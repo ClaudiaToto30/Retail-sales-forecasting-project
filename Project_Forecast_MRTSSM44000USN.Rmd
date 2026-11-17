@@ -1,0 +1,173 @@
+---
+title: "Forecasting U.S. Retail Sales (MRTSSM44000USN) - Final Project"
+author: "Claudia Toto"
+date: "11/17/2026"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Every plot is shown in the report AND saved as a PNG in the "plots" folder
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.path = "plots/", dev = "png",
+                      fig.width = 10, fig.height = 5.5)
+```
+
+# 1. The Problem
+
+The goal is to forecast **monthly U.S. retail sales** for the next 12 months. Retail sales account for a large share of consumer spending, so an accurate forecast helps businesses plan inventory, staffing and cash flow, especially for the holiday season, and works as an early signal of the overall economy.
+
+# 2. The Data
+
+```{r data}
+library(fpp2)
+library(forecast)
+library(readxl)
+
+data_check <- read_excel("MRTSSM44000USN.xlsx", sheet = "Monthly")
+head(data_check)
+sales_ts <- ts(data_check$MRTSSM44000USN, start = c(1992, 1), frequency = 12)
+summary(sales_ts)
+```
+
+**Source:** FRED (Federal Reserve Bank of St. Louis), series MRTSSM44000USN, originally published by the U.S. Census Bureau (Monthly Retail Trade Survey). Monthly retail trade sales in millions of dollars, **not seasonally adjusted**, January 1992 to July 2026 (415 observations).
+
+**Reliability:** it is an official government statistic, collected with a consistent methodology for more than 30 years, with no missing values.
+
+# 3. Methodology
+
+```{r split}
+# Train: Jan 1992 - Jul 2025 | Test: last 12 months, Aug 2025 - Jul 2026
+train <- window(sales_ts, end = c(2025, 7))
+test  <- window(sales_ts, start = c(2025, 8))
+h <- length(test)
+length(train); length(test)
+```
+
+Seven models from the course are compared: **Mean, Naive, Seasonal Naive, ETS, Holt-Winters, STL and ARIMA**. Each model is fitted on the training data (Jan 1992 – Jul 2025) and used to forecast the last 12 months (Aug 2025 – Jul 2026), which the model has never seen. The forecasts are compared with the actual values.
+
+**Accuracy measure: MAPE** (Mean Absolute Percentage Error) on the test set. MAPE expresses the error as a percentage, so it is easy to interpret and to compare across models. RMSE and MASE are also reported as support.
+
+# 4. Exploration
+
+```{r time-series}
+plot(sales_ts, main = "Monthly U.S. Retail Trade Sales", xlab = "Year", ylab = "Millions of Dollars")
+```
+
+**Insight:** strong upward trend, from about \$127 billion per month in 1992 to about \$677 billion in 2026. There is a clear repeating yearly pattern, a drop in 2008–2009 (financial crisis) and a sharp drop in April 2020 (COVID) followed by a fast recovery. The size of the seasonal swings grows as sales grow.
+
+```{r acf}
+Acf(sales_ts, lag.max = 48, main = "ACF - Monthly U.S. Retail Trade Sales")
+```
+
+**Insight:** the autocorrelations are very high and decay slowly, which confirms a strong trend (the series is not stationary). The bumps at lags 12, 24 and 36 confirm the yearly seasonality.
+
+```{r stl-decomposition, fig.height = 7}
+stl_decomp <- stl(sales_ts, s.window = "periodic")
+plot(stl_decomp, main = "STL Decomposition")
+```
+
+**Insight:** the STL decomposition separates the series into trend, seasonality and remainder. The trend is the main driver of the series; the seasonal component repeats every year with a peak in December; the remainder shows the largest shocks in 2008–2009 and 2020.
+
+```{r seasonplot}
+ggseasonplot(window(sales_ts, start = 2019), year.labels = TRUE) +
+  ggtitle("Seasonal plot 2019-2026") + ylab("Millions of Dollars")
+```
+
+**Insight:** every year follows the same shape: January and February are the lowest months, sales rise in the spring and December is always the highest month (holiday season). Each year sits above the previous one, showing the trend.
+
+# 5. Judgement: Models
+
+```{r models}
+mean_fc   <- meanf(train, h = h)
+naive_fc  <- naive(train, h = h)
+snaive_fc <- snaive(train, h = h)
+
+ets_model <- ets(train)
+ets_fc    <- forecast(ets_model, h = h)
+
+HW_model  <- HoltWinters(train)
+HW_fc     <- forecast(HW_model, h = h)
+
+stl_train <- stl(train, s.window = "periodic")
+stl_fc    <- forecast(stl_train, h = h)
+
+arima_model <- auto.arima(train, stepwise = FALSE)
+arima_fc    <- forecast(arima_model, h = h)
+
+ets_model
+arima_model
+```
+
+## Accuracy on the test set
+
+```{r accuracy}
+models <- list("Mean" = mean_fc, "Naive" = naive_fc, "Seasonal Naive" = snaive_fc,
+               "ETS" = ets_fc, "Holt-Winters" = HW_fc, "STL" = stl_fc, "ARIMA" = arima_fc)
+
+for (m in names(models)) { cat("\n--", m, "--\n"); print(accuracy(models[[m]], test)) }
+
+acc_table <- t(sapply(models, function(f) accuracy(f, test)["Test set", c("RMSE", "MAE", "MAPE", "MASE")]))
+round(acc_table[order(acc_table[, "MAPE"]), ], 3)
+```
+
+```{r model-comparison}
+autoplot(window(sales_ts, start = 2023)) +
+  autolayer(snaive_fc, series = "Seasonal Naive", PI = FALSE) +
+  autolayer(ets_fc,    series = "ETS",            PI = FALSE) +
+  autolayer(HW_fc,     series = "Holt-Winters",   PI = FALSE) +
+  autolayer(stl_fc,    series = "STL",            PI = FALSE) +
+  autolayer(arima_fc,  series = "ARIMA",          PI = FALSE) +
+  ggtitle("Forecasts vs. actual sales (test: Aug 2025 - Jul 2026)") +
+  ylab("Millions of Dollars") + guides(colour = guide_legend(title = "Model"))
+```
+
+## Residual analysis
+
+A good model leaves residuals that look like white noise: centered at 0, no significant autocorrelation, and a **Ljung-Box p-value > 0.05**.
+
+```{r resid-ets}
+checkresiduals(ets_fc)
+```
+
+```{r resid-hw}
+checkresiduals(HW_fc)
+```
+
+```{r resid-stl}
+checkresiduals(stl_fc)
+```
+
+```{r resid-arima}
+checkresiduals(arima_fc)
+```
+
+# 6. Recommendation
+
+The final model is the one with the **lowest test-set MAPE** whose residuals behave like white noise (see the table and residual analysis above).
+
+# 7. Forecast and Conclusion
+
+The candidate models are refitted on the full data (Jan 1992 – Jul 2026) to forecast the next 12 months (Aug 2026 – Jul 2027).
+
+```{r final-forecast-ets}
+final_ets <- forecast(ets(sales_ts), h = 12)
+final_ets
+autoplot(final_ets, include = 48) + ggtitle(paste("12-month forecast:", final_ets$method)) +
+  ylab("Millions of Dollars")
+```
+
+```{r final-forecast-arima}
+final_arima <- forecast(auto.arima(sales_ts, stepwise = FALSE), h = 12)
+final_arima
+autoplot(final_arima, include = 48) + ggtitle(paste("12-month forecast:", final_arima$method)) +
+  ylab("Millions of Dollars")
+```
+
+# 8. Ideas to Improve the Forecast
+
+- Add external variables (inflation, employment, consumer confidence, interest rates) with a regression or ARIMAX model.
+- Treat the 2020 COVID months as outliers or use a dummy variable so they do not distort the model.
+- Use a log transformation to stabilize the growing seasonal swings.
+- Forecast in real (inflation-adjusted) dollars to separate price growth from volume growth.
+- Combine (average) the forecasts of the best models.
+- Use time-series cross-validation instead of a single test period.
